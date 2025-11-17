@@ -28,6 +28,25 @@ def safe_float(s):
     except Exception:
         return 0.0
 
+INVOICE_CORE_RE = re.compile(r"[A-Za-z]*[-_ ]*(\d+)$")
+
+def invoice_core(raw: str) -> str:
+    """
+    Normalise Xero invoice numbers like:
+      'SB-2016-00123', 'ACCREC-1234', '2016-000123'
+    down to a common 'core', e.g. '1234' or the trailing numeric part.
+    Fallback is the cleaned alphanumeric string.
+    """
+    s = norm(raw)
+    if not s:
+        return ""
+
+    m = INVOICE_CORE_RE.search(s)
+    if m:
+        return m.group(1)
+
+    # fallback: drop spaces and punctuation, keep alphanumerics
+    return re.sub(r"[^0-9A-Za-z]", "", s)
 
 def normalize_newlines(text: str) -> str:
     # Make csv module happier with mixed line endings
@@ -61,21 +80,24 @@ def build_ledger_key(row: Dict, idx: int) -> str:
     Invoice Number, Reference, Currency, Debit (AUD), Credit (AUD),
     Gross (AUD), Net (AUD), GST (AUD), etc.
     """
-    inv = norm(row.get("Invoice Number") or row.get("InvoiceNumber") or row.get("Reference"))
+    inv_raw = row.get("Invoice Number") or row.get("InvoiceNumber") or row.get("Reference")
+    inv_core = invoice_core(inv_raw)
+
     date = norm(row.get("Date"))
     contact = norm(row.get("Contact"))
     gross_aud = norm(row.get("Gross (AUD)") or row.get("Net (AUD)"))
 
-    if inv:
-        return f"INV::{inv}"
+    # Primary: invoice core
+    if inv_core:
+        return f"INV::{inv_core}"
 
+    # Fallbacks
     if date and contact and gross_aud:
         return f"D+C+G::{date}::{contact}::{gross_aud}"
 
     if date and contact:
         return f"D+C::{date}::{contact}"
 
-    # fallback: unique per-row key so nothing is lost
     return f"LEDGER_ROW::{idx}"
 
 
@@ -87,19 +109,23 @@ def build_master_key(row: Dict, idx: int) -> str:
     Date, Type, Year, Xero number, Invoice ID, Line item ID, Key,
     Contact, Description, Reference, Account code, ...
     """
-    xnum = norm(row.get("Xero number") or row.get("Invoice number") or row.get("Invoice Number"))
-    inv_id = norm(row.get("Invoice ID"))
+    xnum_raw = row.get("Xero number") or row.get("Invoice number") or row.get("Invoice Number")
+    inv_id_raw = row.get("Invoice ID")
+
+    inv_core_xnum = invoice_core(xnum_raw)
+    inv_core_id = invoice_core(inv_id_raw)
+
     date = norm(row.get("Date"))
     contact = norm(row.get("Contact"))
     amt_aud = norm(row.get("Amount aud") or row.get("Line amount"))
 
-    # Prefer explicit invoice number
-    if xnum:
-        return f"INV::{xnum}"
+    # Preferred: Xero number core
+    if inv_core_xnum:
+        return f"INV::{inv_core_xnum}"
 
-    # fall back to Invoice ID if we have nothing better
-    if inv_id:
-        return f"INVID::{inv_id}"
+    # Secondary: Invoice ID core
+    if inv_core_id:
+        return f"INVID::{inv_core_id}"
 
     if date and contact and amt_aud:
         return f"D+C+A::{date}::{contact}::{amt_aud}"
