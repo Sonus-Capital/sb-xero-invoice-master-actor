@@ -28,6 +28,25 @@ def safe_float(s):
     except Exception:
         return 0.0
 
+from decimal import Decimal, InvalidOperation
+
+def amount_key(value: str) -> str:
+    """
+    Normalise a currency string into integer cents for stable matching.
+    e.g. '123.45' -> '12345', '123.4500' -> '12345'.
+    Returns '' if we can't parse it.
+    """
+    s = norm(value)
+    if not s:
+        return ""
+    try:
+        dec = Decimal(s)
+    except InvalidOperation:
+        return ""
+    # convert to cents with rounding
+    cents = int((dec * 100).quantize(Decimal("1")))
+    return str(cents)
+
 INVOICE_CORE_RE = re.compile(r"[A-Za-z]*[-_ ]*(\d+)$")
 
 def invoice_core(raw: str) -> str:
@@ -73,65 +92,53 @@ async def fetch_csv_rows(url: str, label: str) -> List[Dict]:
 
 def build_ledger_key(row: Dict, idx: int) -> str:
     """
-    Build a join key for ledger rows.
+    Build a join key for ledger rows using:
+      Date + Contact + Gross/Net AUD (normalised to cents).
 
-    Columns we know exist there:
-    Date, Source, Contact, Contact Group, Description,
-    Invoice Number, Reference, Currency, Debit (AUD), Credit (AUD),
-    Gross (AUD), Net (AUD), GST (AUD), etc.
+    Ledger header snippet (as per your note):
+      Date, Source, Contact, Contact Group, Description,
+      Invoice Number, Reference, Currency,
+      Debit (AUD), Credit (AUD), Gross (AUD), Net (AUD), GST (AUD), ...
     """
-    inv_raw = row.get("Invoice Number") or row.get("InvoiceNumber") or row.get("Reference")
-    inv_core = invoice_core(inv_raw)
-
     date = norm(row.get("Date"))
     contact = norm(row.get("Contact"))
-    gross_aud = norm(row.get("Gross (AUD)") or row.get("Net (AUD)"))
+    # Prefer Gross (AUD), fall back to Net (AUD) if needed
+    amt_str = row.get("Gross (AUD)") or row.get("Net (AUD)")
+    amt_norm = amount_key(amt_str)
 
-    # Primary: invoice core
-    if inv_core:
-        return f"INV::{inv_core}"
+    if date and contact and amt_norm:
+        return f"DCAMT::{date}::{contact}::{amt_norm}"
 
-    # Fallbacks
-    if date and contact and gross_aud:
-        return f"D+C+G::{date}::{contact}::{gross_aud}"
-
+    # Slightly weaker fallback: date + contact only
     if date and contact:
-        return f"D+C::{date}::{contact}"
+        return f"DC::{date}::{contact}"
 
+    # Last resort
     return f"LEDGER_ROW::{idx}"
 
 
 def build_master_key(row: Dict, idx: int) -> str:
     """
-    Build a join key for 2016_Master_Financials rows.
+    Build a join key for 2016_Master_Financials rows using:
+      Date + Contact + Amount aud (normalised to cents).
 
-    Columns there:
-    Date, Type, Year, Xero number, Invoice ID, Line item ID, Key,
-    Contact, Description, Reference, Account code, ...
+    Master header snippet (your note):
+      Date, Type, Year, Xero number, Invoice ID, Line item ID, Key,
+      Contact, Description, Reference, Account code, Tracking horse,
+      Currency, Line amount, Tax amount, Fx date, Fx rate,
+      Amount aud, Gst aud, ...
     """
-    xnum_raw = row.get("Xero number") or row.get("Invoice number") or row.get("Invoice Number")
-    inv_id_raw = row.get("Invoice ID")
-
-    inv_core_xnum = invoice_core(xnum_raw)
-    inv_core_id = invoice_core(inv_id_raw)
-
     date = norm(row.get("Date"))
     contact = norm(row.get("Contact"))
-    amt_aud = norm(row.get("Amount aud") or row.get("Line amount"))
+    # Prefer Amount aud, fall back to Line amount if needed
+    amt_str = row.get("Amount aud") or row.get("Amount AUD") or row.get("Line amount")
+    amt_norm = amount_key(amt_str)
 
-    # Preferred: Xero number core
-    if inv_core_xnum:
-        return f"INV::{inv_core_xnum}"
-
-    # Secondary: Invoice ID core
-    if inv_core_id:
-        return f"INVID::{inv_core_id}"
-
-    if date and contact and amt_aud:
-        return f"D+C+A::{date}::{contact}::{amt_aud}"
+    if date and contact and amt_norm:
+        return f"DCAMT::{date}::{contact}::{amt_norm}"
 
     if date and contact:
-        return f"D+C::{date}::{contact}"
+        return f"DC::{date}::{contact}"
 
     return f"MASTER_ROW::{idx}"
 
